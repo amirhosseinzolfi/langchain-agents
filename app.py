@@ -6,9 +6,10 @@ from datetime import datetime
 
 from langchain.agents import Tool, AgentExecutor, create_react_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 from langchain_core.callbacks.base import BaseCallbackHandler
 from langchain_core.agents import AgentAction, AgentFinish
+from langchain_core.exceptions import OutputParserException # Optional, for more specific typing
 
 # Import database functions
 import json_db_handler as db
@@ -86,6 +87,7 @@ tools = [
 
 # --- System Prompt ---
 SYSTEM_PROMPT_TEXT = """You are a helpful assistant that manages a JSON database.
+
 Your tasks are:
 1. Chat with the user.
 2. Extract specific information from user messages if it seems like a piece of data they want to remember (e.g., a to-do item, a note).
@@ -95,7 +97,28 @@ Your tasks are:
 5. Remove information from the database using 'RemoveInfoTool' when the user asks, using the 'item_id_to_remove'.
 
 If the user asks to remove an item but doesn't provide an ID, ask them for the ID. You can list items to help them find the ID.
-Be polite and helpful. Always confirm actions taken."""
+Be polite and helpful. Always confirm actions taken.
+
+**Output Format Instructions:**
+When you need to use a tool or provide a final answer, you MUST follow this format:
+
+Thought: [Your reasoning process and plan. Explain what you are trying to do and why.]
+Action: [The name of the tool to use, e.g., SaveInfoTool, ListInfoTool, RemoveInfoTool. If you are providing a final answer to the user, use "Final Answer".]
+Action Input: [If using a tool, the input to the tool as a JSON dictionary. For "Final Answer", this is the direct response to the user.]
+
+Example of using a tool:
+Thought: The user wants to save a to-do item. I need to extract the task description and assign a category.
+Action: SaveInfoTool
+Action Input: {"information": "Buy groceries for the week", "category": "todo"}
+
+Example of providing a final answer:
+Thought: The user asked a general question and I have the answer.
+Action: Final Answer
+Action Input: Hello! How can I assist you today?
+
+If you make a mistake or an observation shows an error, think about what went wrong and try again, following the format.
+If a tool is not needed, or you are responding to a greeting, use "Final Answer".
+"""
 
 prompt_template = ChatPromptTemplate.from_messages([
     ("system", SYSTEM_PROMPT_TEXT),
@@ -116,6 +139,30 @@ cl.log_info("Agent initialized.")
 # --- Chainlit Event Handlers ---
 
 # --- Custom Chainlit Callback Handler for Agent Steps ---
+
+# --- Custom Error Handling Function for ReAct Agent ---
+def handle_react_parsing_error(error: Exception) -> ToolMessage:
+    '''
+    Handles parsing errors from the ReAct agent's LLM output.
+    Formats the error as a ToolMessage to be fed back into the agent's scratchpad.
+    '''
+    # Extract the problematic LLM output if possible (often in error.llm_output or error.observation)
+    # For now, we'll use a generic message based on the error string.
+    # In more advanced scenarios, you might try to get `error.llm_output`
+    error_content = f"Error parsing LLM output: {str(error)}. Please try to reformulate your thought and action."
+    
+    # It's important that this message is presented as an "observation" 
+    # that the agent can then use in its next reasoning step.
+    # Using a ToolMessage is conventional for observations.
+    # The 'tool_call_id' isn't strictly necessary here unless your specific agent/tool setup requires it.
+    # If the error object has an 'observation' field, that might be more appropriate.
+    # Some parsing errors might put the problematic output in `error.observation`.
+    observation = getattr(error, 'observation', error_content)
+    
+    cl.log_warning(f"ReAct Parsing Error. Feeding back to agent: {observation}")
+    # Ensure the content is a string
+    return ToolMessage(content=str(observation), name="ParsingErrorObservation") # Using a descriptive name for the pseudo-tool
+
 class ChainlitCallbackHandler(BaseCallbackHandler):
     def __init__(self):
         super().__init__()
@@ -159,18 +206,18 @@ async def start_chat():
     # LLM, Embeddings, global 'database', tool functions, 'tools' list, 
     # 'SYSTEM_PROMPT_TEXT', and 'prompt_template' are already initialized/defined globally.
     
-    cl.log_info("New chat session started. Initializing agent executor with ChainlitCallbackHandler.")
+    cl.log_info("New chat session started. Initializing agent executor with custom parsing error handler.")
     
     # Instantiate the callback handler
-    chainlit_callback_handler = ChainlitCallbackHandler()
+    chainlit_callback_handler = ChainlitCallbackHandler() # Assuming this is already defined
     
     session_agent = create_react_agent(llm, tools, prompt_template)
     session_agent_executor = AgentExecutor(
         agent=session_agent, 
         tools=tools, 
-        verbose=True, # Keep True for server-side rich logs
-        handle_parsing_errors=True,
-        callbacks=[chainlit_callback_handler] # Add the callback handler here
+        verbose=True,
+        handle_parsing_errors=handle_react_parsing_error, # Use the custom handler
+        callbacks=[chainlit_callback_handler]
     )
     
     # Store the session-specific agent_executor and chat_history in the user's session.
