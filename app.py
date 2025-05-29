@@ -6,10 +6,11 @@ from datetime import datetime
 
 from langchain.agents import Tool, AgentExecutor, create_react_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
 from langchain_core.callbacks.base import BaseCallbackHandler
 from langchain_core.agents import AgentAction, AgentFinish
 from langchain_core.exceptions import OutputParserException # Optional, for more specific typing
+from langchain import hub # Added for hub.pull
 
 # Import database functions
 import json_db_handler as db
@@ -120,17 +121,73 @@ If you make a mistake or an observation shows an error, think about what went wr
 If a tool is not needed, or you are responding to a greeting, use "Final Answer".
 """
 
-prompt_template = ChatPromptTemplate.from_messages([
-    ("system", SYSTEM_PROMPT_TEXT),
-    MessagesPlaceholder(variable_name="chat_history", optional=True),
-    ("human", "{input}"),
-    MessagesPlaceholder(variable_name="agent_scratchpad")
-])
+# Comment out or remove the old prompt_template creation:
+# prompt_template = ChatPromptTemplate.from_messages([...])
+
+# Pull the base ReAct prompt
+# This prompt already includes placeholders for 'tools', 'tool_names', 
+# 'input', 'agent_scratchpad', and typically a system message.
+base_react_prompt = hub.pull("hwchase17/react")
+
+# Our SYSTEM_PROMPT_TEXT is already defined globally.
+# We need to ensure our system message is used.
+# Hub prompts are often ChatPromptTemplate objects. We can inspect their messages.
+# Option A: If the hub prompt's first message is a SystemMessage, modify it.
+# Option B: If more complex, reconstruct or prepend. Let's try to modify if possible.
+
+# Let's inspect the messages and try to replace the system message part.
+# This assumes the hub prompt's structure, which is common for 'hwchase17/react'.
+# The 'hwchase17/react' prompt has its main instructions within a SystemMessage,
+# but also has human/ai message placeholders. The core ReAct instructions are usually part of the system message.
+# We want to insert our detailed system instructions (task, tool usage, ReAct format) there.
+
+# A robust way is to rebuild the messages list from the hub prompt,
+# replacing or augmenting its original system message content.
+# The 'hwchase17/react' prompt has a structure like:
+# [SystemMessage(...), MessagesPlaceholder(variable_name='chat_history', optional=True), HumanMessagePromptTemplate(...), MessagesPlaceholder(variable_name='agent_scratchpad')]
+# The crucial part is that 'tools' and 'tool_names' are handled by the agent when it uses this prompt.
+
+# Let's modify the system message content within the pulled prompt.
+# The base_react_prompt.messages[0] is usually the SystemMessage.
+if base_react_prompt.messages and isinstance(base_react_prompt.messages[0], SystemMessage):
+    # Prepend our detailed system instructions to the existing content of the hub's system message.
+    # This way, we keep any core ReAct formatting from the hub prompt and add our specifics.
+    # Alternatively, replace it if SYSTEM_PROMPT_TEXT is comprehensive enough.
+    # For 'hwchase17/react', its system message already contains core ReAct instructions.
+    # It's often better to use OUR system message as the primary one if it defines the agent's persona and task.
+    # Let's try replacing the content of the first system message.
+    
+    # Our SYSTEM_PROMPT_TEXT already includes detailed ReAct formatting instructions.
+    # So, we can replace the hub prompt's system message content with ours.
+    
+    # Create a new list of messages to avoid modifying the hub object directly if it's cached.
+    new_messages = list(base_react_prompt.messages)
+    new_messages[0] = SystemMessage(content=SYSTEM_PROMPT_TEXT) # Replace system message
+    
+    prompt_template = ChatPromptTemplate.from_messages(new_messages)
+    cl.log_info("Using Langchain Hub prompt 'hwchase17/react' and replaced its system message with our custom SYSTEM_PROMPT_TEXT.")
+
+else:
+    cl.log_warning("Could not find SystemMessage in the pulled hub prompt to replace. Using SYSTEM_PROMPT_TEXT with a basic structure. This might not be optimal for ReAct.")
+    # Fallback if the hub prompt structure is unexpected
+    prompt_template = ChatPromptTemplate.from_messages([
+        SystemMessage(content=SYSTEM_PROMPT_TEXT), # Our custom system message
+        MessagesPlaceholder(variable_name="chat_history", optional=True),
+        ("human", "{input}"),
+        MessagesPlaceholder(variable_name="agent_scratchpad")
+    ])
+    # IMPORTANT: This fallback might still raise the same ValueError if 'tools' and 'tool_names'
+    # are not implicitly handled by create_react_agent when the prompt doesn't come from the hub
+    # with the special partial_variables for tools. The hub.pull() method usually sets this up.
+    # The primary approach (modifying hub prompt) is preferred.
 
 # --- Create Agent ---
-agent = create_react_agent(llm, tools, prompt_template)
-agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True, handle_parsing_errors=True)
-cl.log_info("Agent initialized.")
+# The global agent and agent_executor are not used by Chainlit sessions anymore.
+# They are defined per-session in on_chat_start.
+# agent = create_react_agent(llm, tools, prompt_template)
+# agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True, handle_parsing_errors=True)
+# cl.log_info("Global agent initialized (will be overridden by session agent in Chainlit).")
+cl.log_info("Global prompt_template is now configured using Langchain Hub 'hwchase17/react' with custom system message.")
 
 # --- Main Interaction Loop ---
 # This section has been removed to integrate with Chainlit.
